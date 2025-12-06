@@ -48,11 +48,37 @@ async function run() {
   try {
     await client.connect();
     const db = client.db("LoanLink");
-    const transactionCollection = db.collection("loans");
-// ----------------------------------------------------------------------------------
+    const loansCollection = db.collection("loans");
+    // ----------------------------------------------------------------------------------
     // server running
     app.get("/", (req, res) => {
       res.send("LoanLink server is running!");
+    });
+
+    // get loans data
+    app.get("/loans", async (req, res) => {
+      try {
+        const loans = await loansCollection.find().toArray();
+        res.json(loans);
+      } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Server Error" });
+      }
+    });
+
+    // get loans id details data
+    app.get("/loans/:id", async (req, res) => {
+      try {
+        const loanId = req.params.id;
+        const loan = await loansCollection.findOne({
+          _id: new ObjectId(loanId),
+        });
+        if (!loan) return res.status(404).json({ message: "Loan not found" });
+        res.json(loan);
+      } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: "Server Error" });
+      }
     });
 
     // // transactions:  client > db
@@ -295,7 +321,7 @@ async function run() {
     //     res.status(500).send({ error: "Failed to update transaction" });
     //   }
     // });
-// -----------------------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
 
     // Main function container End
 
