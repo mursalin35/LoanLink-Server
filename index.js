@@ -5,19 +5,20 @@ require("dotenv").config();
 
 const admin = require("firebase-admin");
 const serviceAccount = require("./firebase-admin-sdk-key.json");
+
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
+// Firebase Auth Setup
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
 const uri = process.env.URL_DB;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -26,317 +27,214 @@ const client = new MongoClient(uri, {
   },
 });
 
-// middleWere
+// Middleware: Firebase Token Verify
 const verifyFirebaseToken = async (req, res, next) => {
   const authorization = req.headers.authorization;
   if (!authorization) {
     return res
       .status(401)
-      .send({ message: "unauthorized access token not found " });
+      .send({ message: "Unauthorized: token missing" });
   }
+
   const token = authorization.split(" ")[1];
+
   try {
     await admin.auth().verifyIdToken(token);
     next();
   } catch (error) {
-    res.status(401).send({ message: "unauthorized access" });
+    res.status(401).send({ message: "Unauthorized token" });
   }
 };
 
-// Main function container Start
+// =====================================================================
+
 async function run() {
   try {
     await client.connect();
+
     const db = client.db("LoanLink");
     const loansCollection = db.collection("loans");
-    // ----------------------------------------------------------------------------------
-    // server running
+    const applicationsCollection = db.collection("applications");
+
+    // ---------------------- SERVER RUNNING ----------------------
     app.get("/", (req, res) => {
-      res.send("LoanLink server is running!");
+      res.send("LoanLink Server is Running!");
     });
 
-    // get loans data
+    // ---------------------- LOANS ROUTES ------------------------
+
+    // Get all loans
     app.get("/loans", async (req, res) => {
       try {
         const loans = await loansCollection.find().toArray();
         res.json(loans);
       } catch (error) {
-        console.error(error);
         res.status(500).json({ message: "Server Error" });
       }
     });
 
-    // get loans id details data
+    // Get loan details by ID
     app.get("/loans/:id", async (req, res) => {
       try {
         const loanId = req.params.id;
         const loan = await loansCollection.findOne({
           _id: new ObjectId(loanId),
         });
-        if (!loan) return res.status(404).json({ message: "Loan not found" });
+
+        if (!loan) return res.status(404).json({ message: "Loan Not Found" });
+
         res.json(loan);
       } catch (error) {
-        console.error(error);
         res.status(500).json({ message: "Server Error" });
       }
     });
 
-    // // transactions:  client > db
-    // app.post("/transactions", verifyFirebaseToken, async (req, res) => {
-    //   const data = req.body;
-    //   const result = await transactionCollection.insertOne(data);
-    //   res.send(result);
-    // });
+    // ---------------------- APPLICATION ROUTES ----------------------
 
-    // // my transactions
-    // app.get("/my-transactions", verifyFirebaseToken, async (req, res) => {
-    //   const email = req.query.email;
-    //   if (!email) return res.status(400).send({ error: "Email is required" });
+    // APPLY LOAN — borrower applies
+    app.post("/applications", async (req, res) => {
+      try {
+        const data = req.body;
 
-    //   try {
-    //     const transactions = await transactionCollection
-    //       .find({ userEmail: email })
-    //       .sort({ date: -1 })
-    //       .toArray();
-    //     res.send(transactions);
-    //   } catch (error) {
-    //     res.status(500).send({ error: "Failed to fetch transactions" });
-    //   }
-    // });
+        const newApplication = {
+          ...data,
+          status: "Pending",
+          applicationFeeStatus: "Unpaid",
+          appliedAt: new Date(),
+        };
 
-    // // Reports by Type
-    // app.get("/reports/type", verifyFirebaseToken, async (req, res) => {
-    //   try {
-    //     const { email, month } = req.query;
+        const result = await applicationsCollection.insertOne(newApplication);
+        res.status(201).json(result);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to apply loan" });
+      }
+    });
 
-    //     if (!email) return res.status(400).json({ error: "Email required" });
+    // Admin — Get ALL applications
+    app.get("/applications", async (req, res) => {
+      try {
+        const apps = await applicationsCollection.find().toArray();
+        res.json(apps);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch applications" });
+      }
+    });
 
-    //     const filter = { userEmail: email };
+    // Manager — Get Pending Applications
+    app.get("/applications/pending", async (req, res) => {
+      try {
+        const apps = await applicationsCollection
+          .find({ status: "Pending" })
+          .toArray();
+        res.json(apps);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch pending applications" });
+      }
+    });
 
-    //     if (month) {
-    //       filter.date = { $regex: `^${month}` };
-    //     }
+    // Manager — Approved Applications
+    app.get("/applications/approved", async (req, res) => {
+      try {
+        const apps = await applicationsCollection
+          .find({ status: "Approved" })
+          .toArray();
+        res.json(apps);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch approved apps" });
+      }
+    });
 
-    //     const report = await transactionCollection
-    //       .aggregate([
-    //         { $match: filter },
-    //         {
-    //           $group: {
-    //             _id: "$type",
-    //             totalAmount: { $sum: { $toDouble: "$amount" } },
-    //           },
-    //         },
-    //       ])
-    //       .toArray();
+    // Borrower — get own applications
+    app.get("/applications/user/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
 
-    //     res.json(report);
-    //   } catch (err) {
-    //     res.status(500).json({ error: "Failed to load type report" });
-    //   }
-    // });
+        const apps = await applicationsCollection
+          .find({ userEmail: email })
+          .toArray();
 
-    // // Reports by Category
-    // app.get("/reports/category", verifyFirebaseToken, async (req, res) => {
-    //   try {
-    //     const { email, month } = req.query;
+        res.json(apps);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch user apps" });
+      }
+    });
 
-    //     if (!email) return res.status(400).json({ error: "Email required" });
+    // Approve Application
+    app.patch("/applications/approve/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
 
-    //     const filter = { userEmail: email };
+        const result = await applicationsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: "Approved",
+              applicationFeeStatus: "Paid",
+              approvedAt: new Date(),
+            },
+          }
+        );
 
-    //     if (month) {
-    //       filter.date = { $regex: `^${month}` };
-    //     }
+        res.json(result);
+      } catch (error) {
+        res.status(500).json({ message: "Approval failed" });
+      }
+    });
 
-    //     const report = await transactionCollection
-    //       .aggregate([
-    //         { $match: filter },
-    //         {
-    //           $group: {
-    //             _id: "$category",
-    //             totalAmount: { $sum: { $toDouble: "$amount" } },
-    //           },
-    //         },
-    //       ])
-    //       .toArray();
+    // Reject Application
+    app.patch("/applications/reject/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
 
-    //     res.json(report);
-    //   } catch (err) {
-    //     res.status(500).json({ error: "Failed to load category report" });
-    //   }
-    // });
+        const result = await applicationsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: "Rejected",
+              rejectedAt: new Date(),
+            },
+          }
+        );
 
-    // // Monthly Report
-    // app.get("/reports/monthly", verifyFirebaseToken, async (req, res) => {
-    //   try {
-    //     const { email } = req.query;
-    //     if (!email) return res.status(400).json({ error: "Email required" });
+        res.json(result);
+      } catch (error) {
+        res.status(500).json({ message: "Reject failed" });
+      } 
+    });
 
-    //     const report = await transactionCollection
-    //       .aggregate([
-    //         { $match: { userEmail: email } },
-    //         {
-    //           $addFields: { realDate: { $toDate: "$date" } },
-    //         },
-    //         {
-    //           $group: {
-    //             _id: { $month: "$realDate" },
-    //             totalAmount: { $sum: { $toDouble: "$amount" } },
-    //           },
-    //         },
-    //         { $sort: { _id: 1 } },
-    //       ])
-    //       .toArray();
+    // Borrower — Cancel Application
+    app.patch("/applications/cancel/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
 
-    //     res.json(report);
-    //   } catch (err) {
-    //     res.status(500).json({ error: "Failed to load monthly report" });
-    //   }
-    // });
+        const result = await applicationsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: "Cancelled",
+              cancelledAt: new Date(),
+            },
+          }
+        );
 
-    // // Overview (Total Balance, Income, Expense)
-    // app.get("/overview", async (req, res) => {
-    //   const { email } = req.query;
+        res.json(result);
+      } catch (error) {
+        res.status(500).json({ message: "Cancel failed" });
+      }
+    });
 
-    //   if (!email) {
-    //     return res.status(400).json({ error: "Email is required" });
-    //   }
-
-    //   try {
-    //     // Total Income
-    //     const incomeData = await transactionCollection
-    //       .aggregate([
-    //         { $match: { userEmail: email, type: "Income" } },
-    //         {
-    //           $group: {
-    //             _id: null,
-    //             total: { $sum: { $toDouble: "$amount" } },
-    //           },
-    //         },
-    //       ])
-    //       .toArray();
-
-    //     // Total Expense
-    //     const expenseData = await transactionCollection
-    //       .aggregate([
-    //         { $match: { userEmail: email, type: "Expense" } },
-    //         {
-    //           $group: {
-    //             _id: null,
-    //             total: { $sum: { $toDouble: "$amount" } },
-    //           },
-    //         },
-    //       ])
-    //       .toArray();
-
-    //     const totalIncome = incomeData[0]?.total || 0;
-    //     const totalExpense = expenseData[0]?.total || 0;
-    //     const totalBalance = totalIncome - totalExpense;
-
-    //     res.send({
-    //       totalIncome,
-    //       totalExpense,
-    //       totalBalance,
-    //     });
-    //   } catch (error) {
-    //     res.status(500).json({ error: "Failed to load overview report" });
-    //   }
-    // });
-
-    // // category total (user-specific)
-    // app.get(
-    //   "/transactions/category-total",
-    //   verifyFirebaseToken,
-    //   async (req, res) => {
-    //     const { category, email } = req.query;
-
-    //     // user & category match
-    //     const result = await transactionCollection
-    //       .aggregate([
-    //         {
-    //           $match: {
-    //             category: category,
-    //             userEmail: email,
-    //           },
-    //         },
-    //         {
-    //           $group: {
-    //             _id: null,
-    //             totalAmount: { $sum: { $toDouble: "$amount" } },
-    //           },
-    //         },
-    //       ])
-    //       .toArray();
-
-    //     res.send({ totalAmount: result[0]?.totalAmount || 0 });
-    //   }
-    // );
-
-    // // Delete transaction by ID
-    // app.delete("/transactions/:id", verifyFirebaseToken, async (req, res) => {
-    //   const { id } = req.params;
-    //   try {
-    //     const result = await transactionCollection.deleteOne({
-    //       _id: new ObjectId(id),
-    //     });
-    //     if (result.deletedCount === 1) {
-    //       res.send({ success: true });
-    //     } else {
-    //       res.status(404).send({ error: "Transaction not found" });
-    //     }
-    //   } catch (error) {
-    //     res.status(500).send({ error: "Failed to delete transaction" });
-    //   }
-    // });
-
-    // // transaction details by ID
-    // app.get("/transactions/:id", verifyFirebaseToken, async (req, res) => {
-    //   const { id } = req.params;
-    //   try {
-    //     const transaction = await transactionCollection.findOne({
-    //       _id: new ObjectId(id),
-    //     });
-    //     if (!transaction) return res.status(404).send({ error: "Not found" });
-    //     res.send(transaction);
-    //   } catch (error) {
-    //     res.status(500).send({ error: "Failed to fetch transaction" });
-    //   }
-    // });
-
-    // // Update transaction by ID
-    // app.put("/transactions/:id", verifyFirebaseToken, async (req, res) => {
-    //   const { id } = req.params;
-    //   const updatedData = req.body;
-
-    //   try {
-    //     const result = await transactionCollection.updateOne(
-    //       { _id: new ObjectId(id) },
-    //       { $set: updatedData }
-    //     );
-    //     if (result.matchedCount === 0)
-    //       return res.status(404).send({ error: "Transaction not found" });
-
-    //     res.send({ success: true });
-    //   } catch (error) {
-    //     res.status(500).send({ error: "Failed to update transaction" });
-    //   }
-    // });
-    // -----------------------------------------------------------------------------------------
-
-    // Main function container End
-
-    // MongoClient.EventEmitter
+    // ----------------------------------------------------------------------
 
     await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    console.log("Connected to MongoDB!");
   } finally {
-    // await client.close();
+     // await client.close();
   }
 }
+
 run().catch(console.dir);
 
+// SERVER LISTEN
 app.listen(port, () => {
   console.log(`Server is listening on port ${port}`);
 });
