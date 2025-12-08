@@ -288,6 +288,185 @@ async function run() {
       }
     });
 
+    // ====== (index.js) ======
+// উপরে থাকা imports, admin init, client, verifyFirebaseToken ধরে নিচ্ছি।
+// run() এর ভিতরে, client.connect() পরে নিচের কোডটি যুক্ত / পরিবর্তন করো:
+
+const usersCollection = db.collection("users"); // add this near other collection defs
+
+// helper middleware: check admin role using decoded token email
+const verifyAdmin = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).send({ message: "Unauthorized" });
+    const token = authHeader.split(" ")[1];
+    const decoded = await admin.auth().verifyIdToken(token);
+    const email = decoded.email;
+    if (!email) return res.status(401).send({ message: "Unauthorized" });
+
+    const user = await usersCollection.findOne({ email });
+    if (user?.role === "admin") {
+      req.currentUser = user;
+      next();
+    } else {
+      return res.status(403).send({ message: "Forbidden: admin only" });
+    }
+  } catch (err) {
+    console.error("verifyAdmin:", err);
+    res.status(401).send({ message: "Unauthorized admin" });
+  }
+};
+
+/* ------------------------------
+   Admin: Manage Users routes
+   ------------------------------ */
+
+// Get all users (admin)
+app.get("/admin/users",  async (req, res) => {
+  try {
+    const users = await usersCollection.find().toArray();
+    res.json(users);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch users" });
+  }
+});
+
+// Update user role OR suspend (admin)
+app.patch("/admin/users/role/:email",  async (req, res) => {
+  try {
+    const email = req.params.email;
+    const { role, suspend, suspendReason } = req.body; // { role: 'manager' } or { suspend: true, suspendReason: '...' }
+
+    const update = {};
+    if (role) update.role = role;
+    if (typeof suspend !== "undefined") {
+      update.suspended = !!suspend;
+      if (suspendReason) update.suspendReason = suspendReason;
+    }
+
+    const result = await usersCollection.updateOne(
+      { email },
+      { $set: update },
+      { upsert: false }
+    );
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update user" });
+  }
+});
+
+/* ------------------------------
+   Admin: Loans management routes
+   (If you already had /admin/loans routes, ensure they match these)
+   ------------------------------ */
+
+// Get all loans (admin)
+app.get("/admin/loans",  async (req, res) => {
+  try {
+    // optional search via ?q=term
+    const q = req.query.q;
+    const filter = q
+      ? {
+          $or: [
+            { title: { $regex: q, $options: "i" } },
+            { category: { $regex: q, $options: "i" } },
+          ],
+        }
+      : {};
+    const loans = await loansCollection.find(filter).toArray();
+    res.json(loans);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to get loans" });
+  }
+});
+
+// Update loan (admin)
+app.patch("/admin/loans/:id",  async (req, res) => {
+  try {
+    const id = req.params.id;
+    const update = req.body; // sanitized on client ideally
+    const result = await loansCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: update }
+    );
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update loan" });
+  }
+});
+
+// Delete loan (admin)
+app.delete("/admin/loans/:id",  async (req, res) => {
+  try {
+    const id = req.params.id;
+    const result = await loansCollection.deleteOne({ _id: new ObjectId(id) });
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to delete loan" });
+  }
+});
+
+// Toggle show on home
+app.patch("/admin/loans/show-home/:id",  async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { showOnHome } = req.body;
+    const result = await loansCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { showOnHome: !!showOnHome } }
+    );
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to toggle showOnHome" });
+  }
+});
+
+/* ------------------------------
+   Admin: Loan Applications
+   ------------------------------ */
+
+// Get all applications (admin)
+app.get("/admin/applications",  async (req, res) => {
+  try {
+    // optional filter by ?status=pending|approved|rejected
+    const status = req.query.status;
+    const filter = status ? { status: new RegExp(`^${status}$`, "i") } : {};
+    const apps = await applicationsCollection.find(filter).toArray();
+    res.json(apps);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch applications" });
+  }
+});
+
+// Update application status (approve/reject/cancel) (admin)
+app.patch("/admin/applications/status/:id",  async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { status } = req.body; // 'Approved' | 'Rejected' | ...
+    const update = { status, updatedAt: new Date() };
+    if (status === "Approved") update.approvedAt = new Date();
+    if (status === "Rejected") update.rejectedAt = new Date();
+
+    const result = await applicationsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: update }
+    );
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update application status" });
+  }
+});
+
+
+
     // ------------------------------------------------------------
 
     await client.db("admin").command({ ping: 1 });
