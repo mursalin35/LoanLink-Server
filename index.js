@@ -2,203 +2,340 @@ const express = require("express");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require("dotenv").config();
-
 const admin = require("firebase-admin");
 const serviceAccount = require("./firebase-admin-sdk-key.json");
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+// ----------- MIDDLEWARE ----------
 app.use(cors());
 app.use(express.json());
 
-// Firebase Admin Setup
+// ----------- FIREBASE ADMIN INITIALIZE ----------
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
-// MongoDB
+// ----------- MONGO DB ----------
 const uri = process.env.URL_DB;
 const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
+  serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
 });
 
-// ------------------------------------------------------------
-// Middleware: Firebase Token Verify
-// ------------------------------------------------------------
+// ----------- VERIFY TOKEN ----------
 const verifyFirebaseToken = async (req, res, next) => {
   const authorization = req.headers?.authorization;
-  if (!authorization)
-    return res.status(401).send({ message: "Unauthorized: token missing" });
+  if (!authorization) return res.status(401).send({ message: "Unauthorized: Token Missing" });
 
   const token = authorization.split(" ")[1];
 
   try {
-    await admin.auth().verifyIdToken(token);
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.decodedEmail = decoded.email;
     next();
   } catch (error) {
+    console.log("TOKEN ERROR:", error);
     return res.status(401).send({ message: "Invalid Token" });
   }
 };
 
-// ------------------------------------------------------------
-// Main App Function
-// ------------------------------------------------------------
+// ----------- ROLE VERIFY ----------
+const verifyRole = (usersCollection, roleName) => {
+  return async (req, res, next) => {
+    try {
+      const email = req.decodedEmail;
+      const user = await usersCollection.findOne({ email });
+
+      if (user?.role === roleName) {
+        req.currentUser = user;
+        return next();
+      }
+
+      return res.status(403).send({ message: `Forbidden: ${roleName} only` });
+    } catch (err) {
+      return res.status(401).send({ message: "Authorization failed" });
+    }
+  };
+};
+
+// =====================================================================
+// ===========================  SERVER RUN  =============================
+// =====================================================================
 async function run() {
   try {
     await client.connect();
 
     const db = client.db("LoanLink");
+    const usersCollection = db.collection("users");
     const loansCollection = db.collection("loans");
     const applicationsCollection = db.collection("applications");
 
-    // Home route
-    app.get("/", (req, res) => {
-      res.send("LoanLink Server is Running!");
-    });
+    const adminOnly = verifyRole(usersCollection, "admin");
+    const managerOnly = verifyRole(usersCollection, "manager");
 
-    // =============================================================
-    //                     LOAN ROUTES
-    // =============================================================
+    // ---------------- HOME ----------------
+    app.get("/", (req, res) => res.send("LoanLink Server Running 🚀"));
 
-    // Get all loans (optional search)
-    app.get("/loans", async (req, res) => {
+    // ==================================================
+    // =============== 🔥 USER ROUTES 🔥 ================
+    // ==================================================
+
+    // Create User (Register)
+    app.post("/users", async (req, res) => {
       try {
-        const { search } = req.query;
-        let query = {};
-        if (search) {
-          const regex = new RegExp(search, "i");
-          query = {
-            $or: [
-              { title: { $regex: regex } },
-              { category: { $regex: regex } },
-            ],
-          };
+        const { name, email, photoURL, role } = req.body;
+
+        if (!name || !email) {
+          return res.status(400).send({ message: "Name & Email required" });
         }
-        const loans = await loansCollection.find(query).toArray();
-        res.json(loans);
-      } catch (error) {
-        res.status(500).json({ message: "Server Error" });
-      }
-    });
 
-    // Get loan details by ID
-    app.get("/loans/:id", async (req, res) => {
-      try {
-        const loanId = req.params.id;
-        const loan = await loansCollection.findOne({
-          _id: new ObjectId(loanId),
-        });
+        const existing = await usersCollection.findOne({ email });
 
-        if (!loan) return res.status(404).json({ message: "Loan Not Found" });
+        if (existing) {
+          return res.status(200).json({ message: "User already exists" });
+        }
 
-        res.json(loan);
-      } catch (error) {
-        res.status(500).json({ message: "Server Error" });
-      }
-    });
-
-    // Delete loan by ID
-    app.delete("/loans/:id", async (req, res) => {
-      try {
-        const { id } = req.params;
-        const result = await loansCollection.deleteOne({
-          _id: new ObjectId(id),
-        });
-        if (result.deletedCount === 0)
-          return res.status(404).json({ message: "Loan not found" });
-        res.json({ success: true });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to delete loan" });
-      }
-    });
-
-    // ADD LOAN — Manager Only
-    app.post("/loans", async (req, res) => {
-      try {
-        const loanData = req.body;
-
-        const newLoan = {
-          ...loanData,
+        const newUser = {
+          name,
+          email,
+          photoURL,
+          role: role || "user",
+          suspended: false,
+          suspendReason: "",
           createdAt: new Date(),
         };
 
-        const result = await loansCollection.insertOne(newLoan);
+        const result = await usersCollection.insertOne(newUser);
         res.status(201).json(result);
-      } catch (error) {
-        res.status(500).json({ message: "Failed to add loan" });
+      } catch (err) {
+        console.log(err);
+        res.status(500).send({ message: "Failed to create user" });
       }
     });
 
-    // Update loan by ID
-    app.patch("/loans/:id", async (req, res) => {
+    // ✔️ GET SINGLE USER by EMAIL (Needed for Role Fetch)
+    app.get("/users/:email", verifyFirebaseToken, async (req, res) => {
       try {
-        const { id } = req.params;
-        const data = req.body;
+        const email = req.params.email;
+        const user = await usersCollection.findOne({ email });
+
+        if (!user) return res.status(404).json({ message: "User not found" });
+
+        res.json(user);
+      } catch (error) {
+        res.status(500).json({ message: "Failed to fetch user" });
+      }
+    });
+
+    // ✔️ Get All Users (Admin)
+    app.get("/admin/users", verifyFirebaseToken, adminOnly, async (req, res) => {
+      const users = await usersCollection.find().toArray();
+      res.json(users);
+    });
+
+    // ✔️ Update Role / Suspend (Admin)
+    app.patch("/admin/users/role/:email", verifyFirebaseToken, adminOnly, async (req, res) => {
+      const email = req.params.email;
+      const { role, suspend, suspendReason } = req.body;
+
+      const update = {};
+      if (role) update.role = role;
+      if (typeof suspend !== "undefined") {
+        update.suspended = !!suspend;
+        update.suspendReason = suspend ? suspendReason : "";
+      }
+
+      const result = await usersCollection.updateOne({ email }, { $set: update });
+      res.json(result);
+    });
+
+    // ==================================================
+    // =============== 🔥 LOAN ROUTES 🔥 ================
+    // ==================================================
+
+    // Get All Loans
+    app.get("/loans", async (req, res) => {
+      const search = req.query.search;
+
+      const filter = search
+        ? {
+            $or: [
+              { title: { $regex: search, $options: "i" } },
+              { category: { $regex: search, $options: "i" } },
+            ],
+          }
+        : {};
+
+      const loans = await loansCollection.find(filter).toArray();
+      res.json(loans);
+    });
+
+    // Get Single Loan
+    app.get("/loans/:id", async (req, res) => {
+      const loan = await loansCollection.findOne({ _id: new ObjectId(req.params.id) });
+      res.json(loan);
+    });
+
+    // Add Loan (Manager Only)
+    app.post("/loans", verifyFirebaseToken, managerOnly, async (req, res) => {
+      const data = { ...req.body, createdAt: new Date() };
+      const result = await loansCollection.insertOne(data);
+      res.json(result);
+    });
+
+    // Update Loan (Manager Only)
+    app.patch("/loans/:id", verifyFirebaseToken, managerOnly, async (req, res) => {
+      const result = await loansCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: req.body }
+      );
+      res.json(result);
+    });
+
+    // Delete Loan (Manager Only)
+    app.delete("/loans/:id", verifyFirebaseToken, managerOnly, async (req, res) => {
+      const result = await loansCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+      res.json(result);
+    });
+
+    /* ------------------------------
+       Admin: Loans management routes
+       (If you already had /admin/loans routes, ensure they match these)
+       ------------------------------ */
+    
+    // Get all loans (admin)
+    app.get("/admin/loans",  async (req, res) => {
+      try {
+        // optional search via ?q=term
+        const q = req.query.q;
+        const filter = q
+          ? {
+              $or: [
+                { title: { $regex: q, $options: "i" } },
+                { category: { $regex: q, $options: "i" } },
+              ],
+            }
+          : {};
+        const loans = await loansCollection.find(filter).toArray();
+        res.json(loans);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to get loans" });
+      }
+    });
+    
+    // Update loan (admin)
+    app.patch("/admin/loans/:id",  async (req, res) => {
+      try {
+        const id = req.params.id;
+        const update = req.body; // sanitized on client ideally
         const result = await loansCollection.updateOne(
           { _id: new ObjectId(id) },
-          { $set: data }
+          { $set: update }
         );
-        if (result.matchedCount === 0)
-          return res.status(404).json({ message: "Loan not found" });
-        res.json({ success: true });
-      } catch (error) {
+        res.json(result);
+      } catch (err) {
+        console.error(err);
         res.status(500).json({ message: "Failed to update loan" });
       }
     });
-
-    // =============================================================
-    //                   APPLICATION ROUTES
-    // =============================================================
-
-    // Apply for Loan
-    app.post("/applications", async (req, res) => {
+    
+    // Delete loan (admin)
+    app.delete("/admin/loans/:id",  async (req, res) => {
       try {
-        const data = req.body;
-
-        const newApplication = {
-          ...data,
-          status: "Pending",
-          applicationFeeStatus: "Unpaid",
-          appliedAt: new Date(),
-        };
-
-        const result = await applicationsCollection.insertOne(newApplication);
-        res.status(201).json(result);
-      } catch (error) {
-        res.status(500).json({ message: "Failed to apply loan" });
+        const id = req.params.id;
+        const result = await loansCollection.deleteOne({ _id: new ObjectId(id) });
+        res.json(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to delete loan" });
       }
     });
-
-    // Admin: All Applications
-    app.get("/applications", async (req, res) => {
+    
+    // Toggle show on home
+    app.patch("/admin/loans/show-home/:id",  async (req, res) => {
       try {
-        const apps = await applicationsCollection.find().toArray();
+        const id = req.params.id;
+        const { showOnHome } = req.body;
+        const result = await loansCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { showOnHome: !!showOnHome } }
+        );
+        res.json(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to toggle showOnHome" });
+      }
+    });
+    
+    /* ------------------------------
+       Admin: Loan Applications
+       ------------------------------ */
+    
+    // Get all applications (admin)
+    app.get("/admin/applications",  async (req, res) => {
+      try {
+        // optional filter by ?status=pending|approved|rejected
+        const status = req.query.status;
+        const filter = status ? { status: new RegExp(`^${status}$`, "i") } : {};
+        const apps = await applicationsCollection.find(filter).toArray();
         res.json(apps);
-      } catch (error) {
+      } catch (err) {
+        console.error(err);
         res.status(500).json({ message: "Failed to fetch applications" });
       }
     });
-
-    // Manager: Pending Applications
-    app.get("/applications/pending", async (req, res) => {
+    
+    // Update application status (approve/reject/cancel) (admin)
+    app.patch("/admin/applications/status/:id",  async (req, res) => {
       try {
-        const apps = await applicationsCollection
-          .find({ status: "Pending" })
-          .toArray();
-        res.json(apps);
-      } catch (error) {
-        res
-          .status(500)
-          .json({ message: "Failed to fetch pending applications" });
+        const id = req.params.id;
+        const { status } = req.body; // 'Approved' | 'Rejected' | ...
+        const update = { status, updatedAt: new Date() };
+        if (status === "Approved") update.approvedAt = new Date();
+        if (status === "Rejected") update.rejectedAt = new Date();
+    
+        const result = await applicationsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: update }
+        );
+        res.json(result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to update application status" });
       }
     });
 
-    // Manager: Approved Applications
+    // ==================================================
+    // ============ 🔥 APPLICATION ROUTES 🔥 ============
+    // ==================================================
+
+    // Apply for Loan (User)
+    app.post("/applications", verifyFirebaseToken, async (req, res) => {
+      const data = {
+        ...req.body,
+        status: "Pending",
+        applicationFeeStatus: "Unpaid",
+        appliedAt: new Date(),
+      };
+      const result = await applicationsCollection.insertOne(data);
+      res.json(result);
+    });
+
+    // User Applications
+    app.get("/applications/user/:email", verifyFirebaseToken, async (req, res) => {
+      const apps = await applicationsCollection.find({ userEmail: req.params.email }).toArray();
+      res.json(apps);
+    });
+
+    // Pending Applications (Manager)
+    app.get("/applications/pending", verifyFirebaseToken, managerOnly, async (req, res) => {
+      const pending = await applicationsCollection.find({ status: "Pending" }).toArray();
+      res.json(pending);
+    });
+    
+  // Manager: Approved Applications
     app.get("/applications/approved", async (req, res) => {
       try {
         const apps = await applicationsCollection
@@ -210,275 +347,45 @@ async function run() {
       }
     });
 
-    // Borrower: My Loans
-    app.get("/applications/user/:email", async (req, res) => {
-      try {
-        const email = req.params.email;
-        const apps = await applicationsCollection
-          .find({ userEmail: email })
-          .toArray();
-
-        res.json(apps);
-      } catch (error) {
-        res.status(500).json({ message: "Failed to fetch user apps" });
-      }
-    });
-
-    // Approve Application
-    app.patch("/applications/approve/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-
-        const result = await applicationsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              status: "Approved",
-              applicationFeeStatus: "Paid",
-              approvedAt: new Date(),
-            },
-          }
-        );
-
-        res.json(result);
-      } catch (error) {
-        res.status(500).json({ message: "Approval failed" });
-      }
-    });
-
-    // Reject Application
-    app.patch("/applications/reject/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-
-        const result = await applicationsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              status: "Rejected",
-              rejectedAt: new Date(),
-            },
-          }
-        );
-
-        res.json(result);
-      } catch (error) {
-        res.status(500).json({ message: "Reject failed" });
-      }
-    });
-
-    // Cancel Application
-    app.patch("/applications/cancel/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-
-        const result = await applicationsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              status: "Cancelled",
-              cancelledAt: new Date(),
-            },
-          }
-        );
-
-        res.json(result);
-      } catch (error) {
-        res.status(500).json({ message: "Cancel failed" });
-      }
-    });
-
-    // ====== (index.js) ======
-// উপরে থাকা imports, admin init, client, verifyFirebaseToken ধরে নিচ্ছি।
-// run() এর ভিতরে, client.connect() পরে নিচের কোডটি যুক্ত / পরিবর্তন করো:
-
-const usersCollection = db.collection("users"); // add this near other collection defs
-
-// helper middleware: check admin role using decoded token email
-const verifyAdmin = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) return res.status(401).send({ message: "Unauthorized" });
-    const token = authHeader.split(" ")[1];
-    const decoded = await admin.auth().verifyIdToken(token);
-    const email = decoded.email;
-    if (!email) return res.status(401).send({ message: "Unauthorized" });
-
-    const user = await usersCollection.findOne({ email });
-    if (user?.role === "admin") {
-      req.currentUser = user;
-      next();
-    } else {
-      return res.status(403).send({ message: "Forbidden: admin only" });
-    }
-  } catch (err) {
-    console.error("verifyAdmin:", err);
-    res.status(401).send({ message: "Unauthorized admin" });
-  }
-};
-
-/* ------------------------------
-   Admin: Manage Users routes
-   ------------------------------ */
-
-// Get all users (admin)
-app.get("/admin/users",  async (req, res) => {
-  try {
-    const users = await usersCollection.find().toArray();
-    res.json(users);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to fetch users" });
-  }
-});
-
-// Update user role OR suspend (admin)
-app.patch("/admin/users/role/:email",  async (req, res) => {
-  try {
-    const email = req.params.email;
-    const { role, suspend, suspendReason } = req.body; // { role: 'manager' } or { suspend: true, suspendReason: '...' }
-
-    const update = {};
-    if (role) update.role = role;
-    if (typeof suspend !== "undefined") {
-      update.suspended = !!suspend;
-      if (suspendReason) update.suspendReason = suspendReason;
-    }
-
-    const result = await usersCollection.updateOne(
-      { email },
-      { $set: update },
-      { upsert: false }
-    );
-    res.json(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to update user" });
-  }
-});
-
-/* ------------------------------
-   Admin: Loans management routes
-   (If you already had /admin/loans routes, ensure they match these)
-   ------------------------------ */
-
-// Get all loans (admin)
-app.get("/admin/loans",  async (req, res) => {
-  try {
-    // optional search via ?q=term
-    const q = req.query.q;
-    const filter = q
-      ? {
-          $or: [
-            { title: { $regex: q, $options: "i" } },
-            { category: { $regex: q, $options: "i" } },
-          ],
+    // Approve (Manager)
+    app.patch("/applications/approve/:id", verifyFirebaseToken, managerOnly, async (req, res) => {
+      const result = await applicationsCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        {
+          $set: {
+            status: "Approved",
+            applicationFeeStatus: "Paid",
+            approvedAt: new Date(),
+          },
         }
-      : {};
-    const loans = await loansCollection.find(filter).toArray();
-    res.json(loans);
+      );
+      res.json(result);
+    });
+
+
+    // Reject (Manager)
+    app.patch("/applications/reject/:id", verifyFirebaseToken, managerOnly, async (req, res) => {
+      const result = await applicationsCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { status: "Rejected", rejectedAt: new Date() } }
+      );
+      res.json(result);
+    });
+
+    // Cancel (User)
+    app.patch("/applications/cancel/:id", verifyFirebaseToken, async (req, res) => {
+      const result = await applicationsCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { status: "Cancelled", cancelledAt: new Date() } }
+      );
+      res.json(result);
+    });
+
+    console.log("MongoDB Connected Successfully ✔");
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to get loans" });
-  }
-});
-
-// Update loan (admin)
-app.patch("/admin/loans/:id",  async (req, res) => {
-  try {
-    const id = req.params.id;
-    const update = req.body; // sanitized on client ideally
-    const result = await loansCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: update }
-    );
-    res.json(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to update loan" });
-  }
-});
-
-// Delete loan (admin)
-app.delete("/admin/loans/:id",  async (req, res) => {
-  try {
-    const id = req.params.id;
-    const result = await loansCollection.deleteOne({ _id: new ObjectId(id) });
-    res.json(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to delete loan" });
-  }
-});
-
-// Toggle show on home
-app.patch("/admin/loans/show-home/:id",  async (req, res) => {
-  try {
-    const id = req.params.id;
-    const { showOnHome } = req.body;
-    const result = await loansCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: { showOnHome: !!showOnHome } }
-    );
-    res.json(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to toggle showOnHome" });
-  }
-});
-
-/* ------------------------------
-   Admin: Loan Applications
-   ------------------------------ */
-
-// Get all applications (admin)
-app.get("/admin/applications",  async (req, res) => {
-  try {
-    // optional filter by ?status=pending|approved|rejected
-    const status = req.query.status;
-    const filter = status ? { status: new RegExp(`^${status}$`, "i") } : {};
-    const apps = await applicationsCollection.find(filter).toArray();
-    res.json(apps);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to fetch applications" });
-  }
-});
-
-// Update application status (approve/reject/cancel) (admin)
-app.patch("/admin/applications/status/:id",  async (req, res) => {
-  try {
-    const id = req.params.id;
-    const { status } = req.body; // 'Approved' | 'Rejected' | ...
-    const update = { status, updatedAt: new Date() };
-    if (status === "Approved") update.approvedAt = new Date();
-    if (status === "Rejected") update.rejectedAt = new Date();
-
-    const result = await applicationsCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: update }
-    );
-    res.json(result);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to update application status" });
-  }
-});
-
-
-
-    // ------------------------------------------------------------
-
-    await client.db("admin").command({ ping: 1 });
-    console.log("MongoDB Connected Successfully!");
-  } catch (e) {
-    console.log(e);
+    console.log("DB ERROR:", err);
   }
 }
 
 run();
-
-// Server Listen
-app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
-});
+app.listen(port, () => console.log(`Server running on port ${port}`));
