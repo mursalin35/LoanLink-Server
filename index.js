@@ -451,15 +451,14 @@ async function run() {
     );
 
     // Cancel (User)
-    app.patch(
+    app.delete(
       "/applications/cancel/:id",
       verifyFirebaseToken,
       async (req, res) => {
-        const result = await applicationsCollection.updateOne(
+        const result = await applicationsCollection.deleteOne(
           { _id: new ObjectId(req.params.id) },
-          { $set: { status: "Cancelled", cancelledAt: new Date() } }
         );
-        res.json(result);
+        res.send(result);
       }
     );
 
