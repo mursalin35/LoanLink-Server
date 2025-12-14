@@ -513,6 +513,7 @@ async function run() {
             metadata: {
               loanId,
               userEmail,
+              loanTitle: loanTitle,
             },
 
             success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
